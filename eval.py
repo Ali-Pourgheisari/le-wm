@@ -13,6 +13,8 @@ from omegaconf import DictConfig, OmegaConf
 from sklearn import preprocessing
 from torchvision.transforms import v2 as transforms
 import stable_worldmodel as swm
+import stable_worldmodel.wm.utils
+
 
 def img_transform(cfg):
     transform = transforms.Compose(
@@ -138,6 +140,31 @@ def run(cfg: DictConfig):
 
     world.set_policy(policy)
 
+    # -------------------------------------------------------------
+    # ACTION & OBSERVATION INTERCEPTOR HOOK
+    # -------------------------------------------------------------
+    recorded_actions = []
+    recorded_observations = []  # <--- To capture the matching states
+    original_get_action = world.policy.get_action
+
+    def patched_get_action(info_dict, **kwargs):
+        # 1. Capture the current environment observation dictionary
+        # You can extract specific keys like 'pixels' or state features
+        if 'pixels' in info_dict:
+            # If doing pixel-based behavior cloning
+            recorded_observations.append(info_dict['pixels'].detach().cpu().numpy().copy())
+        else:
+            # Fallback to saving whatever state representation is being fed to the solver
+            recorded_observations.append({k: v.copy() if hasattr(v, 'copy') else v for k, v in info_dict.items()})
+
+        # 2. Call the original policy to compute/return the next action
+        action = original_get_action(info_dict, **kwargs)
+        recorded_actions.append(action.copy())
+        return action
+
+    world.policy.get_action = patched_get_action
+    # -------------------------------------------------------------
+
     results_path.mkdir(parents=True, exist_ok=True)
 
     start_time = time.time()
@@ -153,6 +180,31 @@ def run(cfg: DictConfig):
     end_time = time.time()
     
     print(metrics)
+
+    # -------------------------------------------------------------
+    # SAVE INTERCEPTED ACTIONS & OBSERVATIONS TO DISK
+    # -------------------------------------------------------------
+    if recorded_actions:
+        actions_array = np.stack(recorded_actions, axis=0)
+        print(f"\n🚀 Intercepted {len(recorded_actions)} action steps.")
+        print(f"Action tensor shape: {actions_array.shape}")
+
+        output_dir = Path("/data/5pourghe/le_wm_storage/reacher")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save actions
+        output_file = output_dir / "expert_actions.npy"
+        np.save(output_file, actions_array)
+        print(f"✅ Expert actions successfully dumped to: {output_file}")
+
+        # Save observations
+        obs_array = np.stack(recorded_observations, axis=0)
+        obs_file = output_dir / "expert_observations.npy"
+        np.save(obs_file, obs_array)
+        print(f"✅ Expert observations successfully dumped to: {obs_file}\n")
+    else:
+        print("⚠️ Warning: No actions were captured during this environment run.")
+    # -------------------------------------------------------------
 
     results_path = results_path / cfg.output.filename
     results_path.parent.mkdir(parents=True, exist_ok=True)
