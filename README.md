@@ -5,8 +5,9 @@
 
 # Lightweight Reacher Control via Behavior Cloning
 
-**Authors:** Ali Pourgheisari, Mehran Rajabi
-**Group:** [Knowledge Technology (WTM)](http://www.informatik.uni-hamburg.de/WTM/), Universität Hamburg
+**Authors:** Ali Pourgheisari, Mehran Rajabi <br>
+**Group:** [Knowledge Technology (WTM)](http://www.informatik.uni-hamburg.de/WTM/), Universität Hamburg <br>
+**Report:** [View the report](https://github.com/Ali-Pourgheisari/le-wm/blob/main/Report.pdf)
 
 ## Overview
 
