@@ -1,3 +1,108 @@
+> **This repository is a fork of [lucas-maes/le-wm](https://github.com/lucas-maes/le-wm).**
+> It adds a behavior-cloning distillation of the original repo's CEM planner for the
+> DeepMind Control **Reacher** task. The added work is described below; the original
+> project's README follows unchanged beneath the divider.
+
+# Lightweight Reacher Control via Behavior Cloning
+
+**Authors:** Ali Pourgheisari, Mehran Rajabi
+**Group:** [Knowledge Technology (WTM)](http://www.informatik.uni-hamburg.de/WTM/), Universität Hamburg
+
+## Overview
+
+The upstream repository plans actions for control tasks with a Cross-Entropy Method (CEM)
+solver operating over a learned LeWorldModel (JEPA) latent world model. For Reacher, this
+is accurate but slow: each planning solve samples 300 candidate action sequences and refines
+them over 30 iterations, taking roughly a minute; solving one full episode (two solves,
+covering a 5-step planning horizon with a 5-step action block each) costs on the order of
+**two minutes**. That's fine for generating data offline, but far too slow for reactive,
+real-time control.
+
+This fork treats the CEM planner as an *expert* and distills its behavior into a lightweight
+feed-forward policy: a **68k-parameter MLP** that maps the arm's proprioceptive state and
+goal directly to motor torques, with no search and no planning loop. The distilled policy
+reaches the target in **68% of held-out episodes** at sub-millisecond inference — trading a
+modest amount of task performance for roughly five orders of magnitude in speed.
+
+## Pipeline
+
+**1. Source dataset.** `reacher_random` (10,000 episodes × 201 steps) is used only as a bank
+of physically realistic states — not imitated directly. For each demonstration we sample a
+valid start step and set the goal to the arm's configuration 25 steps later in that same
+trajectory, guaranteeing every goal is reachable.
+
+**2. Expert demonstration collection** (`collect_all.py`). For each of 2,000 rollouts, the
+environment is reset to a sampled start state and target joint configuration
+(`set_state` + `set_target_qpos`), then the CEM/JEPA expert drives it for 50 steps
+(`num_samples=300`, `topk=30`, 30 iterations, horizon 5, action block 5). At every step we
+record the **low-dimensional state** — joint angles (`qpos`), joint velocities (`qvel`),
+fingertip position — and the executed action; the goal joint configuration is recorded once
+per episode. No camera pixels are stored: a rendered frame is ≈1.5×10⁵ values, costs more to
+train on, and — critically — doesn't even contain the goal, whereas `(qpos, qvel, goal_qpos)`
+does.
+
+**3. Data curation.** A raw CEM rollout reaches the target partway through the episode and
+then drifts, so cloning the whole trajectory would teach the policy to wander after arriving.
+Each episode is truncated at its **closest approach** to the goal (shortest-arc angular
+distance across both joints), and episodes that never come within **10°** of the goal on
+both joints are dropped as failures. Of 2,000 collected episodes, 1,993 are retained, giving
+**58,715** `(state, action)` training pairs.
+
+**4. Policy architecture and training** (`train_bc_mlp.py`). A plain MLP,
+`6 → 256 → 256 → 2` (ReLU hidden layers, `tanh`-bounded output, ≈68k parameters), maps
+`[qpos, qvel, goal_qpos]` to a 2D torque command. Trained with MSE loss, Adam
+(lr `1e-3`, weight decay `1e-5`), batch size 256, up to 300 epochs with early stopping
+(patience 15). The train/validation split is at the **episode** level (85%/15%) so no state
+from a held-out episode leaks into training. Training takes about a minute on a single GPU.
+
+**5. Evaluation** (`eval_bc_mlp.py`). The trained MLP is patched directly into the policy's
+`get_action` hook and rolled out in closed loop on 50 fresh, seeded start/goal pairs. Success
+is scored using the same criterion as the expert: the arm counts as successful if it comes
+within 10° of the goal (both joints) at **any** step of the rollout.
+
+## Results
+
+| Metric | Value |
+|---|---|
+| Closed-loop success rate (50 held-out episodes) | **68%** (34/50) |
+| Model size | **~68k** parameters (no transformer, no CNN) |
+| Training time | **~1 min** on a single GPU |
+| Inference cost | **<1 ms** per step |
+| Full evaluation (50 episodes incl. video rendering) | **~18 s** |
+| Expert (CEM) reach rate, for comparison | **~99.6%**, at ~2 min/episode |
+
+The residual training-loss error is high relative to a predict-the-mean baseline (MSE 0.122
+vs. 0.142) — expected, since CEM is a stochastic optimizer and the same state can map to
+different sampled actions across episodes. A unimodal MSE regressor recovers the conditional
+*mean* action, which for a reaching task still preserves the correct direction of motion —
+hence per-step action error is a poor proxy for task success, and the closed-loop rollout
+above is the metric that matters.
+
+## Reproducing
+
+```bash
+# 1. Collect expert demonstrations (long-running; ~2 min/episode of CEM search)
+python collect_all.py
+
+# 2. Train the distilled MLP policy
+python train_bc_mlp.py
+
+# 3. Evaluate the distilled policy in closed loop
+python eval_bc_mlp.py --config-name reacher
+```
+
+Collected data and trained weights are written under `$STABLEWM_HOME` (see the
+**Data** section below for how that path is configured) rather than tracked in git.
+
+## Possible next steps
+
+- Scale demonstrations by sampling multiple goals per source episode (2k → 10k+).
+- Enrich the goal representation with Cartesian fingertip information.
+- Replace the unimodal MSE head with a distributional action head (e.g. diffusion) to
+  better capture the expert's stochastic, multimodal action distribution.
+- Interactive data aggregation (DAgger) to address covariate shift in the failure cases.
+
+---
 
 # LeWorldModel
 ### Stable End-to-End Joint-Embedding Predictive Architecture from Pixels
